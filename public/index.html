@@ -580,7 +580,7 @@ async function loadFlights(){
   document.getElementById("s-count").textContent="...";
   document.getElementById("demo-banner").style.display="none";
   try{
-    var res=await fetch("/api/flights",{signal:AbortSignal.timeout(10000)});
+    var res=await fetch("/.netlify/functions/flights",{signal:AbortSignal.timeout(10000)});
     if(!res.ok) throw new Error("HTTP "+res.status);
     var data=await res.json();
     flights=(data.flights||[]).map(function(f){
