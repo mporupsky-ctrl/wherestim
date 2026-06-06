@@ -1,15 +1,6 @@
 [build]
   publish = "public"
   functions = "netlify/functions"
-  edge_functions = "netlify/edge-functions"
 
 [functions]
   node_bundler = "esbuild"
-
-[functions."flights"]
-  timeout = 26
-
-[[headers]]
-  for = "/api/*"
-  [headers.values]
-    Cache-Control = "no-store"
