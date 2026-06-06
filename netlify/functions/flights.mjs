@@ -1,89 +1,53 @@
 import https from 'https';
 
-function get(url, headers = {}) {
+function get(url) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
-    https.get({ hostname: u.hostname, path: u.pathname + u.search, headers }, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => resolve({ status: res.statusCode, ok: res.statusCode < 300, body: data }));
-    }).on('error', reject).setTimeout(12000, function(){ this.destroy(new Error('timeout')); });
-  });
-}
-
-function post(url, body, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const buf = Buffer.from(body);
-    const req = https.request({
-      hostname: u.hostname, path: u.pathname, method: 'POST',
-      headers: { ...headers, 'Content-Length': buf.length }
-    }, (res) => {
+    const req = https.get({ hostname: u.hostname, path: u.pathname + u.search }, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => resolve({ status: res.statusCode, ok: res.statusCode < 300, body: data }));
     });
     req.on('error', reject);
-    req.setTimeout(12000, () => { req.destroy(new Error('timeout')); });
-    req.write(buf);
-    req.end();
+    req.setTimeout(15000, () => { req.destroy(new Error('timeout')); });
   });
 }
 
 export default async (req, context) => {
-  const LAMIN = 24, LAMAX = 50, LOMIN = -126, LOMAX = -66;
-  const isDelta = cs => cs && (cs.trim().startsWith('DAL') || cs.trim().startsWith('DL'));
-  const url = 'https://opensky-network.org/api/states/all?lamin='+LAMIN+'&lamax='+LAMAX+'&lomin='+LOMIN+'&lomax='+LOMAX;
+  const isDelta = cs => cs && (cs.trim().toUpperCase().startsWith('DAL') || cs.trim().toUpperCase().startsWith('DL'));
+  const apiKey = Netlify.env.get('AVIATIONSTACK_KEY');
 
-  const clientId     = Netlify.env.get('OPENSKY_CLIENT_ID');
-  const clientSecret = Netlify.env.get('OPENSKY_CLIENT_SECRET');
-  let flights = [], source = 'none', lastError = '';
+  try {
+    const url = 'http://api.aviationstack.com/v1/flights?access_key=' + apiKey + '&airline_iata=DL&flight_status=active&limit=100';
+    const res = await get(url);
+    if (!res.ok) {
+      return new Response(JSON.stringify({ error: 'API error: ' + res.status + ' ' + res.body.substring(0,200), flights: [] }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } });
+    }
+    const d = JSON.parse(res.body);
+    if (d.error) {
+      return new Response(JSON.stringify({ error: d.error.message || JSON.stringify(d.error), flights: [] }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } });
+    }
+    const flights = (d.data || [])
+      .filter(f => f.live && f.live.latitude && f.live.longitude)
+      .map(f => ({
+        callsign: f.flight.iata || f.flight.icao || 'DAL',
+        lat: f.live.latitude,
+        lon: f.live.longitude,
+        alt: f.live.altitude ? Math.round(f.live.altitude * 3.281) : null,
+        spd: f.live.speed_horizontal ? Math.round(f.live.speed_horizontal * 0.539957) : null,
+        heading: f.live.direction ? Math.round(f.live.direction) : null,
+        actype: 'A220',
+        origin: f.departure && f.departure.iata ? f.departure.iata : null,
+        dest: f.arrival && f.arrival.iata ? f.arrival.iata : null,
+      }))
+      .filter(f => f.lat >= 24 && f.lat <= 50 && f.lon >= -126 && f.lon <= -66);
 
-  // Try 1: OAuth
-  if (clientId && clientSecret) {
-    try {
-      const body = 'grant_type=client_credentials&client_id='+encodeURIComponent(clientId)+'&client_secret='+encodeURIComponent(clientSecret);
-      const tok = await post(
-        'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token',
-        body, { 'Content-Type': 'application/x-www-form-urlencoded' }
-      );
-      if (tok.ok) {
-        const { access_token } = JSON.parse(tok.body);
-        const data = await get(url, { 'Authorization': 'Bearer ' + access_token });
-        if (data.ok) {
-          const d = JSON.parse(data.body);
-          flights = (d.states||[]).filter(s => isDelta((s[1]||'').trim()) && s[5] && s[6]).map(s => ({
-            callsign:(s[1]||'').trim(), lat:s[6], lon:s[5],
-            alt:s[7]?Math.round(s[7]*3.281):null, spd:s[9]?Math.round(s[9]*1.944):null,
-            heading:s[10]?Math.round(s[10]):null, actype:'A220'
-          }));
-          source = 'opensky-oauth';
-        }
-      } else { lastError = 'token:' + tok.status + ' ' + tok.body.substring(0,100); }
-    } catch(e) { lastError = 'oauth:' + e.message; }
+    return new Response(JSON.stringify({ flights, source: 'aviationstack', count: flights.length }),
+      { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+  } catch(err) {
+    return new Response(JSON.stringify({ error: err.message, flights: [] }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
-
-  // Try 2: Anonymous
-  if (flights.length === 0) {
-    try {
-      const data = await get(url, { 'User-Agent': 'WheresTim/1.0' });
-      if (data.ok) {
-        const d = JSON.parse(data.body);
-        flights = (d.states||[]).filter(s => isDelta((s[1]||'').trim()) && s[5] && s[6]).map(s => ({
-          callsign:(s[1]||'').trim(), lat:s[6], lon:s[5],
-          alt:s[7]?Math.round(s[7]*3.281):null, spd:s[9]?Math.round(s[9]*1.944):null,
-          heading:s[10]?Math.round(s[10]):null, actype:'A220'
-        }));
-        source = 'opensky-anon';
-      } else { lastError += ' anon:' + data.status; }
-    } catch(e) { lastError += ' anon:' + e.message; }
-  }
-
-  if (flights.length === 0) {
-    return new Response(JSON.stringify({ error: lastError, flights: [], source: 'none' }),
-      { status: 503, headers: { 'Content-Type': 'application/json' } });
-  }
-
-  return new Response(JSON.stringify({ flights, source, count: flights.length }),
-    { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 }
